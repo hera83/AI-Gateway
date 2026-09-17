@@ -69,7 +69,6 @@ public class KeysController(IKeyService keyService) : ControllerBase
 
     [HttpPost("{id:guid}")]
     [ProducesResponseType(typeof(RolloverKeyResponseDto), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ErrorResponseDto), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ErrorResponseDto), StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Rollover(Guid id, CancellationToken cancellationToken)
     {
@@ -117,6 +116,15 @@ public class KeysController(IKeyService keyService) : ControllerBase
                 })
                 .ToList()
         });
+    }
+
+    [HttpDelete("{id:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ErrorResponseDto), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
+    {
+        await keyService.DeleteAsync(id, cancellationToken);
+        return NoContent();
     }
 
     private static SvcDto.CreateKeyDto ToService(CreateKeyRequestDto request) => new()

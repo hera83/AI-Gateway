@@ -74,21 +74,17 @@ public class KeyService(AppDbContext dbContext) : IKeyService
     public async Task<RolledOverKeyDto> RolloverAsync(Guid id, CancellationToken cancellationToken)
     {
         var entity = await FindAsync(id, cancellationToken);
-
-        // Rolling over an already-expired key would silently hand back a plaintext secret that can
-        // never authenticate (ExpiresAt is untouched by rollover) — reject it instead, same rationale
-        // as the ExpiresAt-in-the-future check on Create/Update.
-        if (entity.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow)
-        {
-            throw new ApiKeyExpiredException(id, expiresAt);
-        }
-
         var (plainTextKey, hash) = GenerateKey();
 
         entity.KeyHash = hash;
         entity.LastRotatedAt = DateTimeOffset.UtcNow;
 
-        AddAuditLog(entity.Id, ApiKeyAuditAction.RolledOver, $"Nøgle '{entity.Name}' roteret.");
+        // Rollover doubles as "renew", same as Activate — always pushes ExpiresAt a year out, so
+        // rotating an already-expired key's secret also makes it usable again instead of silently
+        // handing back a plaintext secret that can never authenticate.
+        entity.ExpiresAt = DateTimeOffset.UtcNow.AddYears(1);
+
+        AddAuditLog(entity.Id, ApiKeyAuditAction.RolledOver, $"Nøgle '{entity.Name}' roteret, ny udløbsdato: {entity.ExpiresAt:yyyy-MM-dd}.");
         await dbContext.SaveChangesAsync(cancellationToken);
 
         return new RolledOverKeyDto
@@ -104,8 +100,23 @@ public class KeyService(AppDbContext dbContext) : IKeyService
         var entity = await FindAsync(id, cancellationToken);
         entity.IsActive = isActive;
 
+        // Activate doubles as "renew", same as Rollover — always pushes ExpiresAt a year out, so
+        // reactivating an expired key makes it usable again. Deactivate mirrors this by setting
+        // ExpiresAt to now, so a deactivated key also reads as expired everywhere (audit log,
+        // listings) rather than just IsActive-false.
         var action = isActive ? ApiKeyAuditAction.Activated : ApiKeyAuditAction.Deactivated;
-        var verb = isActive ? "aktiveret" : "deaktiveret";
+        string verb;
+        if (isActive)
+        {
+            entity.ExpiresAt = DateTimeOffset.UtcNow.AddYears(1);
+            verb = $"aktiveret, ny udløbsdato: {entity.ExpiresAt:yyyy-MM-dd}";
+        }
+        else
+        {
+            entity.ExpiresAt = DateTimeOffset.UtcNow;
+            verb = "deaktiveret";
+        }
+
         AddAuditLog(entity.Id, action, $"Nøgle '{entity.Name}' {verb}.");
         await dbContext.SaveChangesAsync(cancellationToken);
 
@@ -130,6 +141,16 @@ public class KeyService(AppDbContext dbContext) : IKeyService
                 Details = log.Details
             })
             .ToList();
+    }
+
+    public async Task DeleteAsync(Guid id, CancellationToken cancellationToken)
+    {
+        var entity = await FindAsync(id, cancellationToken);
+
+        // Hard delete, by explicit request — cascades (see AppDbContext.OnModelCreating) to the
+        // key's own audit log and to any knowledge-base groups/documents/chunks created under it.
+        dbContext.ApiKeys.Remove(entity);
+        await dbContext.SaveChangesAsync(cancellationToken);
     }
 
     private async Task<ApiKey> FindAsync(Guid id, CancellationToken cancellationToken) =>

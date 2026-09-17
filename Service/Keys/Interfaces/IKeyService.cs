@@ -17,4 +17,6 @@ public interface IKeyService
     Task<KeyDto> SetActiveAsync(Guid id, bool isActive, CancellationToken cancellationToken);
 
     Task<IReadOnlyList<AuditLogEntryDto>> GetAuditLogAsync(Guid id, CancellationToken cancellationToken);
+
+    Task DeleteAsync(Guid id, CancellationToken cancellationToken);
 }

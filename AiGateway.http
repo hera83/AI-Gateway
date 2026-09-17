@@ -57,6 +57,11 @@ GET {{AiGateway_HostAddress}}/keys/{{KeyId}}/audit-log
 X-Api-Key: {{MasterApiKey}}
 Accept: application/json
 
+### Delete a key permanently — hard delete, cascades to its audit log and any Knowledge Base
+### groups/documents/chunks created under it. Cannot be undone.
+DELETE {{AiGateway_HostAddress}}/Keys/Delete/{{KeyId}}
+X-Api-Key: {{MasterApiKey}}
+
 ### Ollama / Speaches endpoints require any active key (Standard or Administrator)
 GET {{AiGateway_HostAddress}}/ollama/version
 X-Api-Key: {{MasterApiKey}}
