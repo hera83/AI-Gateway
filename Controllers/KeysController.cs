@@ -69,6 +69,7 @@ public class KeysController(IKeyService keyService) : ControllerBase
 
     [HttpPost("{id:guid}")]
     [ProducesResponseType(typeof(RolloverKeyResponseDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponseDto), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ErrorResponseDto), StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Rollover(Guid id, CancellationToken cancellationToken)
     {

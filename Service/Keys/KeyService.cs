@@ -74,6 +74,15 @@ public class KeyService(AppDbContext dbContext) : IKeyService
     public async Task<RolledOverKeyDto> RolloverAsync(Guid id, CancellationToken cancellationToken)
     {
         var entity = await FindAsync(id, cancellationToken);
+
+        // Rolling over an already-expired key would silently hand back a plaintext secret that can
+        // never authenticate (ExpiresAt is untouched by rollover) — reject it instead, same rationale
+        // as the ExpiresAt-in-the-future check on Create/Update.
+        if (entity.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow)
+        {
+            throw new ApiKeyExpiredException(id, expiresAt);
+        }
+
         var (plainTextKey, hash) = GenerateKey();
 
         entity.KeyHash = hash;

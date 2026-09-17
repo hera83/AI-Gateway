@@ -32,6 +32,9 @@ public class GlobalExceptionHandler(IHostEnvironment environment, ILogger<Global
         ApiKeyNotFoundException notFoundEx =>
             (StatusCodes.Status404NotFound, "API key not found", notFoundEx.Message),
 
+        ApiKeyExpiredException expiredEx =>
+            (StatusCodes.Status400BadRequest, "API key expired", expiredEx.Message),
+
         KnowledgeGroupNotFoundException notFoundEx =>
             (StatusCodes.Status404NotFound, "Knowledge group not found", notFoundEx.Message),
 
