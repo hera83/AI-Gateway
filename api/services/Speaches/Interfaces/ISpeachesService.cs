@@ -11,9 +11,14 @@ public interface ISpeachesService
 
     Task<TranscriptionResponseDto> TranscribeAsync(TranscriptionRequestDto request, CancellationToken cancellationToken = default);
 
-    // Proxies an already-accepted client WebSocket to Speaches' /v1/realtime (intent=transcription): a
-    // duplex relay, not a request/response call, until either side closes the connection.
-    Task ProxyRealtimeTranscriptionAsync(WebSocket clientSocket, string model, string? language, CancellationToken cancellationToken = default);
+    // Proxies a client WebSocket to Speaches' /v1/realtime (intent=transcription): a duplex relay, not a
+    // request/response call, until either side closes the connection. Speaches is connected first, and only
+    // then is the client accepted via acceptClientAsync, so a failing upstream is an ordinary SpeachesException (502).
+    Task ProxyRealtimeTranscriptionAsync(
+        Func<Task<WebSocket>> acceptClientAsync,
+        string model,
+        string? language,
+        CancellationToken cancellationToken = default);
 
     Task<TranslationResponseDto> TranslateAsync(TranslationRequestDto request, CancellationToken cancellationToken = default);
 
@@ -29,7 +34,7 @@ public interface ISpeachesService
 
     Task<ListAudioModelsResponseDto> ListAudioModelsAsync(CancellationToken cancellationToken = default);
 
-    Task<ListModelsResponseDto> ListVoicesAsync(CancellationToken cancellationToken = default);
+    Task<ListVoicesResponseDto> ListVoicesAsync(CancellationToken cancellationToken = default);
 
     Task<ModelDto> GetModelAsync(string modelId, CancellationToken cancellationToken = default);
 

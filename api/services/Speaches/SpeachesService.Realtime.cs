@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -6,7 +7,11 @@ namespace api.Services.Speaches;
 
 public partial class SpeachesService
 {
-    public async Task ProxyRealtimeTranscriptionAsync(WebSocket clientSocket, string model, string? language, CancellationToken cancellationToken = default)
+    public async Task ProxyRealtimeTranscriptionAsync(
+        Func<Task<WebSocket>> acceptClientAsync,
+        string model,
+        string? language,
+        CancellationToken cancellationToken = default)
     {
         // Speaches' realtime endpoint is the same host/port as the HTTP API, just upgraded to a WebSocket.
         var httpClient = await httpClientFactory.CreateClientAsync(cancellationToken);
@@ -24,8 +29,19 @@ public partial class SpeachesService
             Query = query
         }.Uri;
 
+        // Speaches is connected before the client is upgraded. After the upgrade (101) no ProblemDetails can be
+        // written, so a client whose upstream connection failed would just see its socket drop without a reason.
         using var upstreamSocket = new ClientWebSocket();
-        await upstreamSocket.ConnectAsync(upstreamUri, cancellationToken);
+        try
+        {
+            await upstreamSocket.ConnectAsync(upstreamUri, cancellationToken);
+        }
+        catch (WebSocketException exception)
+        {
+            throw new SpeachesException(HttpStatusCode.BadGateway, $"Could not open the realtime connection to Speaches: {exception.Message}");
+        }
+
+        using var clientSocket = await acceptClientAsync();
 
         // Each direction is driven only by the request's own cancellation token, never by the other
         // direction failing. Cancelling a pending WebSocket.ReceiveAsync aborts the whole socket, so a
@@ -99,7 +115,9 @@ public partial class SpeachesService
                 result = await source.ReceiveAsync(buffer, cancellationToken);
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
-                    if (destination.State == WebSocketState.Open)
+                    // CloseReceived: the destination closed first, and this frame is the other side's answer. Passing it
+                    // on completes the destination's close handshake, so it sees a clean close instead of a dropped socket.
+                    if (destination.State is WebSocketState.Open or WebSocketState.CloseReceived)
                     {
                         await destination.CloseOutputAsync(result.CloseStatus ?? WebSocketCloseStatus.NormalClosure, result.CloseStatusDescription, cancellationToken);
                     }

@@ -15,4 +15,6 @@ public class KnowledgeBaseSettings
     public long MaxUploadSizeBytes { get; set; } = 20 * 1024 * 1024;
 
     public int DefaultTopK { get; set; } = 5;
+
+    public KnowledgeBaseOcrSettings Ocr { get; set; } = new();
 }

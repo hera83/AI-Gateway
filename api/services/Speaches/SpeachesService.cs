@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using api.Services.Speaches.Dtos.Errors;
 using api.Services.Speaches.Interfaces;
 
@@ -10,10 +11,12 @@ namespace api.Services.Speaches;
 
 public partial class SpeachesService(SpeachesHttpClientFactory httpClientFactory, ILogger<SpeachesService> logger) : ISpeachesService
 {
-    // Speaches' OpenAI-compatible wire format is snake_case.
+    // Speaches' OpenAI-compatible wire format is snake_case. Unset optional fields are left out instead of sent
+    // as null, because Speaches rejects null for fields that have a default (e.g. "speed" on v1/audio/speech → 422).
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
-        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
     private async Task<TResponse> GetAsync<TResponse>(string requestUri, CancellationToken cancellationToken)
@@ -67,6 +70,16 @@ public partial class SpeachesService(SpeachesHttpClientFactory httpClientFactory
         return await ReadJsonOrDefaultAsync<TResponse>(response, cancellationToken);
     }
 
+    // For calls whose answer isn't used. The body is never parsed, because Speaches answers some of them with
+    // plain text instead of JSON (POST v1/models/{id}: "Model '...' downloaded").
+    private async Task SendWithoutBodyAsync(HttpMethod method, string requestUri, CancellationToken cancellationToken)
+    {
+        var httpClient = await httpClientFactory.CreateClientAsync(cancellationToken);
+        using var httpRequest = new HttpRequestMessage(method, requestUri);
+        using var response = await httpClient.SendAsync(httpRequest, cancellationToken);
+        await EnsureSuccessAsync(response, cancellationToken);
+    }
+
     private static MultipartFormDataContent BuildMultipartContent(IDictionary<string, string> fields, Stream file, string fileName, string? contentType)
     {
         var content = new MultipartFormDataContent();
@@ -118,8 +131,9 @@ public partial class SpeachesService(SpeachesHttpClientFactory httpClientFactory
             // Not a JSON error body, so the raw body is used as-is.
         }
 
+        // Only the path, never the host: the message is sent to API clients as "detail", and BaseUrl is an internal address.
         throw new SpeachesException(
             response.StatusCode,
-            $"Speaches request to '{response.RequestMessage?.RequestUri}' failed with status {(int)response.StatusCode} ({response.StatusCode}): {message}");
+            $"Speaches request to '{response.RequestMessage?.RequestUri?.PathAndQuery}' failed with status {(int)response.StatusCode} ({response.StatusCode}): {message}");
     }
 }

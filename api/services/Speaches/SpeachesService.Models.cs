@@ -10,17 +10,17 @@ public partial class SpeachesService
     public Task<ListAudioModelsResponseDto> ListAudioModelsAsync(CancellationToken cancellationToken = default) =>
         GetAsync<ListAudioModelsResponseDto>("v1/audio/models", cancellationToken);
 
-    public Task<ListModelsResponseDto> ListVoicesAsync(CancellationToken cancellationToken = default) =>
-        GetAsync<ListModelsResponseDto>("v1/audio/voices", cancellationToken);
+    public Task<ListVoicesResponseDto> ListVoicesAsync(CancellationToken cancellationToken = default) =>
+        GetAsync<ListVoicesResponseDto>("v1/audio/voices", cancellationToken);
 
     public Task<ModelDto> GetModelAsync(string modelId, CancellationToken cancellationToken = default) =>
         GetAsync<ModelDto>($"v1/models/{modelId}", cancellationToken);
 
     public Task DownloadModelAsync(string modelId, CancellationToken cancellationToken = default) =>
-        SendWithoutBodyAsync<MessageResponseDto>(HttpMethod.Post, $"v1/models/{modelId}", cancellationToken);
+        SendWithoutBodyAsync(HttpMethod.Post, $"v1/models/{modelId}", cancellationToken);
 
     public Task DeleteModelAsync(string modelId, CancellationToken cancellationToken = default) =>
-        SendWithoutBodyAsync<MessageResponseDto>(HttpMethod.Delete, $"v1/models/{modelId}", cancellationToken);
+        SendWithoutBodyAsync(HttpMethod.Delete, $"v1/models/{modelId}", cancellationToken);
 
     public Task<ListModelsResponseDto> GetRegistryAsync(string? task, CancellationToken cancellationToken = default) =>
         GetAsync<ListModelsResponseDto>(task is null ? "v1/registry" : $"v1/registry?task={Uri.EscapeDataString(task)}", cancellationToken);

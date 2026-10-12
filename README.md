@@ -10,7 +10,7 @@ AI Gateway er et .NET 10 Web API (controller-baseret), der fungerer som et samle
 | **API-nøgler** (`/Keys/*`) | Opret, rediger, rotér ("rollover"), aktivér/deaktivér og slet nøgler, med audit-log pr. nøgle. Kun master-nøglen. |
 | **Ollama** (`/Ollama/*`) | Generate, chat (også streaming), embeddings, model-administration og version. |
 | **Speaches** (`/Speaches/*`) | Chat completions, transskribering (også realtime over WebSocket), oversættelse, talesyntese, speaker-embeddings, VAD-tidsstempler, diarization og model-administration. |
-| **Knowledge base / RAG** (`/KnowledgeBase/*`) | Hver standard-nøgle har sin egen private vidensbank: grupper, upload af txt/md/pdf/docx (udtrækkes, chunkes og embeddes), søgning og RAG-chat. Data er fuldstændig adskilt mellem nøgler. |
+| **Knowledge base / RAG** (`/KnowledgeBase/*`) | Hver standard-nøgle har sin egen private vidensbank: grupper, upload af txt/md/pdf/docx (udtrækkes, chunkes og embeddes), søgning og RAG-chat. Skannede PDF-sider og tekst i billeder læses med Tesseract OCR, og resultatet kvalitetstjekkes, før det indekseres. Data er fuldstændig adskilt mellem nøgler. |
 | **Logs** (`/Logs/Search`) | Søgning i applikationens logs (niveau, fritekst, tidsinterval, paging). Kun master-nøglen. |
 | **Swagger UI** (`/swagger`) | Interaktiv dokumentation med **Authorize**-knap til `x-api-key` og et badge, der viser miljøet. Tilgængelig i alle miljøer. |
 
@@ -20,7 +20,7 @@ AI Gateway er et .NET 10 Web API (controller-baseret), der fungerer som et samle
 - **Fejl:** alle fejlsvar er RFC 9110 ProblemDetails (`application/problem+json`).
 - **Data** i `app_dbs/`: `app.db` (nøgler og knowledge base-metadata, EF Core), `vectors.db` (embeddings via sqlite-vec) og `log.db` (Serilog).
 - **Filer:** originale uploads ligger i `app_files/KnowledgeDocuments/` som `<guid>.<endelse>`.
-- **Struktur:** `controllers/` → `managers/` → `repositories/` (egen database og egne filer) og `services/` (Ollama, Speaches). Se `.claude/` i løsningens rod for de fulde konventioner.
+- **Struktur:** `controllers/` → `managers/` → `repositories/` (egen database og egne filer) og `services/` (Ollama, Speaches, Tesseract). Se `.claude/` i løsningens rod for de fulde konventioner.
 
 ## Kom i gang med Docker (anbefalet)
 
@@ -63,6 +63,8 @@ dotnet run --project api --launch-profile http    # http://localhost:5207/swagge
 ```
 
 Lokalt bruges `appsettings.Development.json` (gitignored) til master-nøglen og adresserne på Ollama og Speaches. Migrations køres automatisk ved opstart.
+
+OCR af PDF'er bruger Tesseract. Sprogmodellerne ligger i `api/services/Tesseract/Tessdata/` (i git). Selve Windows-programmet (~160 MB) er gitignored og skal ligge i `api/services/Tesseract/Engine/win-x64/`. Efter et frisk clone: installér [Tesseract 5](https://github.com/UB-Mannheim/tesseract/wiki), kopiér `tesseract.exe` og alle `.dll`-filer fra installationsmappen dertil, og afinstallér den igen. Se `api/services/Tesseract/Documents/Tesseract.md`. Uden Tesseract virker PDF'er med tekstlag stadig, men skannede sider kan ikke læses. Docker-imaget har Tesseract med.
 
 ## Yderligere dokumentation
 

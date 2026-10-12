@@ -90,8 +90,9 @@ public partial class OllamaService(OllamaHttpClientFactory httpClientFactory) : 
             // Not Ollama's JSON error body, so the raw body is used as-is.
         }
 
+        // Only the path, never the host: the message is sent to API clients as "detail", and BaseUrl is an internal address.
         throw new OllamaException(
             response.StatusCode,
-            $"Ollama request to '{response.RequestMessage?.RequestUri}' failed with status {(int)response.StatusCode} ({response.StatusCode}): {message}");
+            $"Ollama request to '{response.RequestMessage?.RequestUri?.PathAndQuery}' failed with status {(int)response.StatusCode} ({response.StatusCode}): {message}");
     }
 }

@@ -17,12 +17,19 @@
     </PackageReference>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.10" />
     <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
+    <PackageReference Include="PdfPig" Version="0.1.16" />
+    <PackageReference Include="PDFtoImage" Version="5.4.0" />
     <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
     <PackageReference Include="Serilog.Sinks.SQLite" Version="7.0.0" />
     <PackageReference Include="sqlite-vec" Version="0.1.7-alpha.2.1" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.4" />
     <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" Version="10.2.3" />
-    <PackageReference Include="UglyToad.PdfPig" Version="1.7.0-custom-5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Tesseract's language models are published with the app (Docker uses them too). The Windows program in
+         services/Tesseract/Engine/ is local only and never published. -->
+    <None Update="services\Tesseract\Tessdata\**" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

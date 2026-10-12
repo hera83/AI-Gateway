@@ -7,15 +7,19 @@ using api.Services.Ollama.Dtos.Chat;
 using api.Services.Ollama.Dtos.Common;
 using api.Services.Ollama.Dtos.Embed;
 using api.Services.Ollama.Interfaces;
+using api.Services.Tesseract.Interfaces;
 using Microsoft.Extensions.Options;
 
 namespace api.Managers.KnowledgeBase;
 
-public class KnowledgeBaseManager(
+// Text extraction (incl. OCR) lives in KnowledgeBaseManager.Extraction.cs.
+public partial class KnowledgeBaseManager(
     IKnowledgeGroupRepository knowledgeGroupRepository,
     IKnowledgeDocumentRepository knowledgeDocumentRepository,
     IOllamaService ollamaService,
-    IOptions<KnowledgeBaseSettings> options) : IKnowledgeBaseManager
+    ITesseractService tesseractService,
+    IOptions<KnowledgeBaseSettings> options,
+    ILogger<KnowledgeBaseManager> logger) : IKnowledgeBaseManager
 {
     public async Task<UploadDocumentResultDto> UploadDocumentAsync(UploadDocumentDto dto, CancellationToken cancellationToken = default)
     {
@@ -46,33 +50,43 @@ public class KnowledgeBaseManager(
             Content = dto.Content
         }, cancellationToken);
 
-        string text;
+        // Extraction, embedding (Ollama) and indexing all fail the same way: the document is kept with Status
+        // "Failed" and the reason, so it never stays "Processing". HttpClient timeouts are also
+        // OperationCanceledException, so only the caller's own cancellation is let through.
         try
         {
-            await using var fileStream = await knowledgeDocumentRepository.OpenFileAsync(dto.ApiKeyId, document.Id, cancellationToken)
-                ?? throw new InvalidOperationException("The stored file could not be opened.");
-            text = await DocumentTextExtractor.ExtractTextAsync(fileStream, dto.FileName, cancellationToken);
+            string text;
+            await using (var fileStream = await knowledgeDocumentRepository.OpenFileAsync(dto.ApiKeyId, document.Id, cancellationToken)
+                ?? throw new InvalidOperationException("The stored file could not be opened."))
+            {
+                text = await ExtractTextAsync(fileStream, dto.FileName, document.Id, cancellationToken);
+            }
+
             if (string.IsNullOrWhiteSpace(text))
             {
                 throw new InvalidOperationException("No extractable text was found in the file.");
             }
+
+            var chunks = ChunkText(text, settings.ChunkSizeCharacters, settings.ChunkOverlapCharacters);
+            var embeddings = await ollamaService.EmbedAsync(new EmbedRequestDto { Model = settings.EmbeddingModel, Input = chunks }, cancellationToken);
+
+            var indexed = await knowledgeDocumentRepository.MarkIndexedAsync(document.Id, new IndexKnowledgeDocumentDto
+            {
+                ExtractedText = text,
+                Chunks = chunks.Select((chunk, index) => new CreateKnowledgeChunkDto { Text = chunk, Embedding = embeddings.Embeddings[index] }).ToList()
+            }, cancellationToken);
+
+            return new UploadDocumentResultDto { Outcome = UploadDocumentOutcome.Uploaded, Document = indexed ?? document };
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            var failed = await knowledgeDocumentRepository.MarkFailedAsync(document.Id, exception.Message, cancellationToken);
+            logger.LogWarning(exception, "Indexing knowledge document {DocumentId} failed", document.Id);
+
+            // ErrorMessage is shown to the caller. A connection error's own message names Ollama's internal host and port.
+            var reason = exception is HttpRequestException ? "The embedding service (Ollama) could not be reached." : exception.Message;
+            var failed = await knowledgeDocumentRepository.MarkFailedAsync(document.Id, reason, cancellationToken);
             return new UploadDocumentResultDto { Outcome = UploadDocumentOutcome.Uploaded, Document = failed ?? document };
         }
-
-        var chunks = ChunkText(text, settings.ChunkSizeCharacters, settings.ChunkOverlapCharacters);
-        var embeddings = await ollamaService.EmbedAsync(new EmbedRequestDto { Model = settings.EmbeddingModel, Input = chunks }, cancellationToken);
-
-        var indexed = await knowledgeDocumentRepository.MarkIndexedAsync(document.Id, new IndexKnowledgeDocumentDto
-        {
-            ExtractedText = text,
-            Chunks = chunks.Select((chunk, index) => new CreateKnowledgeChunkDto { Text = chunk, Embedding = embeddings.Embeddings[index] }).ToList()
-        }, cancellationToken);
-
-        return new UploadDocumentResultDto { Outcome = UploadDocumentOutcome.Uploaded, Document = indexed ?? document };
     }
 
     public async Task<bool> DeleteGroupAsync(Guid apiKeyId, Guid knowledgeGroupId, CancellationToken cancellationToken = default)

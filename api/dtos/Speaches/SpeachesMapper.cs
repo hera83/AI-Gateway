@@ -240,10 +240,18 @@ public static class SpeachesMapper
         Object = response.Object
     };
 
-    public static ListVoicesSpeachesResponseDto ToListVoicesSpeachesResponseDto(this SvcModels.ListModelsResponseDto response) => new()
+    public static ListVoicesSpeachesResponseDto ToListVoicesSpeachesResponseDto(this SvcModels.ListVoicesResponseDto response) => new()
     {
-        Data = response.Data.Select(ToModelDto).ToList(),
+        Voices = response.Voices.Select(ToVoiceDto).ToList(),
         Object = response.Object
+    };
+
+    public static VoiceDto ToVoiceDto(this SvcModels.VoiceDto voice) => new()
+    {
+        Id = voice.Id,
+        Name = voice.Name,
+        Language = voice.Language,
+        Gender = voice.Gender
     };
 
     public static GetRegistrySpeachesResponseDto ToGetRegistrySpeachesResponseDto(this SvcModels.ListModelsResponseDto response) => new()

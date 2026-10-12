@@ -11,5 +11,6 @@ CLAUDE.md
 **/appsettings.Development.json
 **/app_dbs
 **/app_files
+**/services/Tesseract/Engine
 **/*.user
 .env

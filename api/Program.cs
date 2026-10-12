@@ -22,6 +22,8 @@ using api.Services.Ollama;
 using api.Services.Ollama.Interfaces;
 using api.Services.Speaches;
 using api.Services.Speaches.Interfaces;
+using api.Services.Tesseract;
+using api.Services.Tesseract.Interfaces;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -116,6 +118,7 @@ builder.Services.AddScoped<IOllamaService, OllamaService>();
 builder.Services.AddScoped<ISpeachesConfigurationProvider, SpeachesConfigurationProvider>();
 builder.Services.AddScoped<SpeachesHttpClientFactory>();
 builder.Services.AddScoped<ISpeachesService, SpeachesService>();
+builder.Services.AddScoped<ITesseractService, TesseractService>();
 
 // Workers
 builder.Services.AddHostedService<LogCleanupWorker>();

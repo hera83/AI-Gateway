@@ -49,8 +49,8 @@ public class KnowledgeBaseController(
     public async Task<IActionResult> DeleteGroup(Guid id, CancellationToken cancellationToken) =>
         await knowledgeBaseManager.DeleteGroupAsync(ApiKeyId, id, cancellationToken) ? NoContent() : NotFound();
 
-    // Extracted, chunked, embedded and indexed synchronously. If extraction fails the document is still
-    // stored (and downloadable) with Status "Failed".
+    // Extracted, chunked, embedded and indexed synchronously. If extraction, embedding or indexing fails the
+    // document is still stored (and downloadable) with Status "Failed" and the reason in ErrorMessage.
     [HttpPost]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status413PayloadTooLarge)]

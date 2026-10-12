@@ -23,5 +23,5 @@
 ## Faldgruber
 - Wire-formatet er snake_case via `JsonOptions` (`SnakeCaseLower`). `[JsonPropertyName]` bruges kun, hvor et navn afviger.
 - Streaming kræver `HttpCompletionOption.ResponseHeadersRead`, ellers bufres hele svaret, før første chunk returneres.
-- Fejl fra Ollama giver `OllamaException` med Ollamas statuskode og `error`-tekst. `GlobalExceptionHandler` sender statuskoden videre. Kan Ollama ikke nås, giver det `HttpRequestException` (502) eller timeout (504).
+- Fejl fra Ollama giver `OllamaException` med Ollamas statuskode og `error`-tekst. `GlobalExceptionHandler` sender statuskoden videre. Kan Ollama ikke nås, giver det `HttpRequestException` (502 med en fast tekst, fordi exception'ens egen besked indeholder værtens IP og port) eller timeout (504). Beskeden i `OllamaException` indeholder kun stien og aldrig `BaseUrl`'s vært, fordi den sendes til klienten som `detail`.
 - `Stream` sættes af servicen selv. Kalderen vælger metode (`GenerateAsync` eller `GenerateStreamAsync`).

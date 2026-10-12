@@ -32,6 +32,9 @@ appsettings.Development.json
 !**/app_files/**/
 !**/app_files/**/.gitkeep
 
+## Tesseract til Windows (tesseract.exe + DLL'er, ~160 MB) installeres lokalt. Sprogmodellerne i Tessdata/ committes.
+**/services/Tesseract/Engine/
+
 ## Lokal støj: IDE
 *.user
 *.userosscache

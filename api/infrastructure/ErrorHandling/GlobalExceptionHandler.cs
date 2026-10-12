@@ -33,8 +33,9 @@ public class GlobalExceptionHandler(
         // E.g. a request body above Kestrel:Limits:MaxRequestBodySize.
         BadHttpRequestException badRequestException => (badRequestException.StatusCode, badRequestException.Message),
 
-        // Connection-level failure reaching Ollama/Speaches (no HTTP response at all).
-        HttpRequestException httpException => (StatusCodes.Status502BadGateway, httpException.Message),
+        // Connection-level failure reaching Ollama/Speaches (no HTTP response at all). Its message names the
+        // upstream host and port, so it is only logged, never sent to the client.
+        HttpRequestException => (StatusCodes.Status502BadGateway, "An upstream service could not be reached."),
 
         TaskCanceledException or OperationCanceledException => (StatusCodes.Status504GatewayTimeout, "The upstream request timed out."),
 
