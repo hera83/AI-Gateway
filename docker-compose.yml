@@ -1,0 +1,21 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    ports:
+      - "5000:5000"
+    env_file: .env
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+    volumes:
+      - api_app_dbs:/app/app_dbs
+      - api_app_files:/app/app_files
+    extra_hosts:
+      # Lets Ollama__BaseUrl/Speaches__BaseUrl use host.docker.internal on Linux too (Docker Desktop has it built in).
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  api_app_dbs:
+  api_app_files:

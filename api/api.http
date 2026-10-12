@@ -1,0 +1,154 @@
+@Host = http://localhost:5207
+// Paste your local ApiKeys:MasterKey (from appsettings.Development.json) here. Don't commit a real value.
+@MasterKey = REPLACE_WITH_YOUR_DEV_MASTER_KEY
+// A standard key, created with Keys/Create below. Required for the knowledge base (the master key gets 403).
+@StandardKey = REPLACE_WITH_A_STANDARD_KEY
+@KeyId = 00000000-0000-0000-0000-000000000000
+@GroupId = 00000000-0000-0000-0000-000000000000
+@DocumentId = 00000000-0000-0000-0000-000000000000
+
+### Health (no key required)
+GET {{Host}}/Health/Check
+
+### Keys: list (master key only)
+GET {{Host}}/Keys/List
+x-api-key: {{MasterKey}}
+
+### Keys: create. The returned "apiKey" is shown once and never again.
+POST {{Host}}/Keys/Create
+x-api-key: {{MasterKey}}
+Content-Type: application/json
+
+{
+  "name": "Example integration",
+  "responsibleName": "Jane Doe",
+  "contactInfo": "jane.doe@example.com"
+}
+
+### Keys: get one
+GET {{Host}}/Keys/GetById/{{KeyId}}
+x-api-key: {{MasterKey}}
+
+### Keys: update
+PUT {{Host}}/Keys/Update/{{KeyId}}
+x-api-key: {{MasterKey}}
+Content-Type: application/json
+
+{
+  "name": "Example integration",
+  "responsibleName": "Jane Doe",
+  "contactInfo": "jane.doe@example.com",
+  "expiresAt": "2027-01-01T00:00:00Z"
+}
+
+### Keys: rollover. The old key stops working; the new "apiKey" is shown once.
+POST {{Host}}/Keys/Rollover/{{KeyId}}
+x-api-key: {{MasterKey}}
+
+### Keys: deactivate / activate
+POST {{Host}}/Keys/Deactivate/{{KeyId}}
+x-api-key: {{MasterKey}}
+
+###
+POST {{Host}}/Keys/Activate/{{KeyId}}
+x-api-key: {{MasterKey}}
+
+### Keys: audit log
+GET {{Host}}/Keys/GetAuditLog/{{KeyId}}
+x-api-key: {{MasterKey}}
+
+### Keys: delete permanently, including everything the key owns in the knowledge base
+DELETE {{Host}}/Keys/Delete/{{KeyId}}
+x-api-key: {{MasterKey}}
+
+### Logs: search (master key only). All query parameters are optional.
+GET {{Host}}/Logs/Search?Level=Error&Search=timeout&From=2026-07-01T00:00:00Z&Page=1&PageSize=50
+x-api-key: {{MasterKey}}
+
+### Knowledge base: create a group
+POST {{Host}}/KnowledgeBase/CreateGroup
+x-api-key: {{StandardKey}}
+Content-Type: application/json
+
+{
+  "name": "Kunde data"
+}
+
+### Knowledge base: list groups
+GET {{Host}}/KnowledgeBase/ListGroups
+x-api-key: {{StandardKey}}
+
+### Knowledge base: delete a group with all its documents
+DELETE {{Host}}/KnowledgeBase/DeleteGroup/{{GroupId}}
+x-api-key: {{StandardKey}}
+
+### Knowledge base: upload a document (txt/md/pdf/docx); extracted, chunked, embedded and indexed synchronously
+POST {{Host}}/KnowledgeBase/UploadDocument
+x-api-key: {{StandardKey}}
+Content-Type: multipart/form-data; boundary=AiGatewayBoundary
+
+--AiGatewayBoundary
+Content-Disposition: form-data; name="GroupId"
+
+{{GroupId}}
+--AiGatewayBoundary
+Content-Disposition: form-data; name="File"; filename="example.txt"
+Content-Type: text/plain
+
+This is example knowledge base content used to test upload and RAG search.
+--AiGatewayBoundary--
+
+### Knowledge base: list documents (GroupId is optional)
+GET {{Host}}/KnowledgeBase/ListDocuments?GroupId={{GroupId}}
+x-api-key: {{StandardKey}}
+
+### Knowledge base: download the original file
+GET {{Host}}/KnowledgeBase/DownloadDocument/{{DocumentId}}
+x-api-key: {{StandardKey}}
+
+### Knowledge base: delete a document
+DELETE {{Host}}/KnowledgeBase/DeleteDocument/{{DocumentId}}
+x-api-key: {{StandardKey}}
+
+### Knowledge base: search across all of the key's groups (TopK is optional)
+POST {{Host}}/KnowledgeBase/Search
+x-api-key: {{StandardKey}}
+Content-Type: application/json
+
+{
+  "query": "What is in the example content?",
+  "topK": 5
+}
+
+### Knowledge base: RAG chat. Resend the whole conversation each turn; retrieval uses the latest user message.
+POST {{Host}}/KnowledgeBase/RagChat
+x-api-key: {{StandardKey}}
+Content-Type: application/json
+
+{
+  "model": "llama3.2",
+  "messages": [
+    { "role": "user", "content": "What is in the example content?" }
+  ],
+  "topK": 5
+}
+
+### Ollama: version (any key)
+GET {{Host}}/Ollama/GetVersion
+x-api-key: {{StandardKey}}
+
+### Ollama: chat (set "stream": true for NDJSON)
+POST {{Host}}/Ollama/Chat
+x-api-key: {{StandardKey}}
+Content-Type: application/json
+
+{
+  "model": "llama3.2",
+  "messages": [
+    { "role": "user", "content": "Hej!" }
+  ]
+}
+
+### Speaches: list models (any key)
+GET {{Host}}/Speaches/ListModels
+x-api-key: {{StandardKey}}

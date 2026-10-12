@@ -1,0 +1,52 @@
+## Regler for denne fil: se .claude/gitignore.md
+## Én fil dækker alle projekter. Mønstre skrives uden foranstillet / eller */, så de gælder i alle dybder.
+
+## Alle mapper, der starter med punktum (.vs, .vscode, .idea, .claude, .github, .config …). Ingen undtagelser.
+.*/
+
+## AI-instrukser (bevidst lokale). .claude/ er dækket af .*/
+CLAUDE.md
+
+## Kompileret output
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+*.dll
+*.pdb
+
+## Secrets (rigtige nøgler og passwords må aldrig i git)
+appsettings.Development.json
+.env
+.env.*
+!.env.example
+
+## Databaser: alle filer i app_dbs/ ignoreres, kun .gitkeep committes
+**/app_dbs/**
+!**/app_dbs/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+
+## Appens filer: alle filer i app_files/ ignoreres i alle dybder, mappestrukturen bevares via .gitkeep
+**/app_files/**
+!**/app_files/**/
+!**/app_files/**/.gitkeep
+
+## Lokal støj: IDE
+*.user
+*.userosscache
+*.suo
+
+## Lokal støj: logs
+*.log
+
+## Lokal støj: OS
+.DS_Store
+Thumbs.db
+
+## Lokal støj: NuGet
+*.nupkg
+packages/
+project.lock.json
+project.fragment.lock.json
+artifacts/

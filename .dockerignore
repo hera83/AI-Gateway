@@ -1,0 +1,15 @@
+**/bin
+**/obj
+**/.vs
+**/.vscode
+**/.idea
+**/.git
+.claude
+**/.claude
+CLAUDE.md
+**/CLAUDE.md
+**/appsettings.Development.json
+**/app_dbs
+**/app_files
+**/*.user
+.env
