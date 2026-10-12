@@ -12,7 +12,7 @@ public class KnowledgeBaseSettings
 
     public int ChunkOverlapCharacters { get; set; } = 150;
 
-    public long MaxUploadSizeBytes { get; set; } = 20 * 1024 * 1024;
+    public long MaxUploadSizeBytes { get; set; } = 250 * 1024 * 1024;
 
     public int DefaultTopK { get; set; } = 5;
 
