@@ -5,6 +5,12 @@ public class PdfPageTextDto
 {
     public string Text { get; set; } = string.Empty;
 
+    // The page's own text layer is part of Text (first, before any OCR text).
+    public bool UsesTextLayer { get; set; }
+
+    // The OCR results used in Text, in order.
+    public List<string> OcrTexts { get; set; } = [];
+
     public bool IsWholePageOcr { get; set; }
 
     public int OcrAccepted { get; set; }

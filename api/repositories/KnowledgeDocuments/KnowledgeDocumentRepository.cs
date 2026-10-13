@@ -59,6 +59,75 @@ public class KnowledgeDocumentRepository(
             .Select(x => x.Id)
             .ToListAsync(cancellationToken);
 
+    // Not scoped to a key: used by the background worker, which processes every key's uploads, oldest first.
+    public Task<KnowledgeDocumentDto?> GetNextProcessingAsync(CancellationToken cancellationToken = default) =>
+        dbContext.KnowledgeDocuments.AsNoTracking()
+            .Where(x => x.Status == KnowledgeDocumentStatus.Processing)
+            .OrderBy(x => x.CreatedAt)
+            .Select(KnowledgeDocumentMapper.ToDtoExpression)
+            .FirstOrDefaultAsync(cancellationToken);
+
+    // Indexed documents whose Markdown is missing or made by an older converter version. Not scoped to a key: the
+    // background worker makes it again.
+    public Task<KnowledgeDocumentDto?> GetNextWithOutdatedMarkdownAsync(int currentVersion, CancellationToken cancellationToken = default) =>
+        dbContext.KnowledgeDocuments.AsNoTracking()
+            .Where(x => x.Status == KnowledgeDocumentStatus.Indexed && (x.MarkdownText == null || x.MarkdownVersion < currentVersion))
+            .OrderBy(x => x.CreatedAt)
+            .Select(KnowledgeDocumentMapper.ToDtoExpression)
+            .FirstOrDefaultAsync(cancellationToken);
+
+    public Task<KnowledgeDocumentMarkdownDto?> GetMarkdownAsync(Guid apiKeyId, Guid id, CancellationToken cancellationToken = default) =>
+        dbContext.KnowledgeDocuments.AsNoTracking()
+            .Where(x => x.ApiKeyId == apiKeyId && x.Id == id)
+            .Select(KnowledgeDocumentMapper.ToMarkdownDtoExpression)
+            .FirstOrDefaultAsync(cancellationToken);
+
+    // Not scoped to a key: the LLM worker lays out every key's documents, oldest first. Only Markdown of the current
+    // version, so a document that is about to be made again is never laid out from its old Markdown.
+    public Task<KnowledgeDocumentLlmMarkdownDto?> GetNextMarkdownLlmPendingAsync(int currentVersion, CancellationToken cancellationToken = default) =>
+        dbContext.KnowledgeDocuments.AsNoTracking()
+            .Where(x => x.Status == KnowledgeDocumentStatus.Indexed &&
+                        x.MarkdownSource == KnowledgeMarkdownSource.LlmPending &&
+                        x.MarkdownVersion == currentVersion &&
+                        x.MarkdownText != null)
+            .OrderBy(x => x.CreatedAt)
+            .Select(KnowledgeDocumentMapper.ToLlmMarkdownDtoExpression)
+            .FirstOrDefaultAsync(cancellationToken);
+
+    public Task<bool> SetMarkdownAsync(Guid id, string markdown, bool needsLlm, int version, CancellationToken cancellationToken = default) =>
+        UpdateMarkdownAsync(id, entity =>
+        {
+            entity.MarkdownText = markdown;
+            entity.MarkdownSource = needsLlm ? KnowledgeMarkdownSource.LlmPending : KnowledgeMarkdownSource.Structure;
+            entity.MarkdownVersion = version;
+        }, cancellationToken);
+
+    // Saved after every part, so the LLM layout continues from here after a restart.
+    public Task<bool> SaveLlmMarkdownProgressAsync(Guid id, string draft, int partsDone, int partsTotal, CancellationToken cancellationToken = default) =>
+        UpdateMarkdownAsync(id, entity =>
+        {
+            entity.MarkdownLlmDraft = draft;
+            entity.MarkdownLlmPartsDone = partsDone;
+            entity.MarkdownLlmPartsTotal = partsTotal;
+        }, cancellationToken, keepLlmProgress: true);
+
+    public Task<bool> SetLlmMarkdownAsync(Guid id, string markdown, CancellationToken cancellationToken = default) =>
+        UpdateMarkdownAsync(id, entity =>
+        {
+            entity.MarkdownText = markdown;
+            entity.MarkdownSource = KnowledgeMarkdownSource.Llm;
+        }, cancellationToken);
+
+    // Keeps the Markdown made from the structure and takes the document out of the LLM queue.
+    public Task<bool> SkipLlmMarkdownAsync(Guid id, CancellationToken cancellationToken = default) =>
+        UpdateMarkdownAsync(id, entity => entity.MarkdownSource = KnowledgeMarkdownSource.Structure, cancellationToken);
+
+    public Task<KnowledgeDocumentTextDto?> GetTextAsync(Guid apiKeyId, Guid id, CancellationToken cancellationToken = default) =>
+        dbContext.KnowledgeDocuments.AsNoTracking()
+            .Where(x => x.ApiKeyId == apiKeyId && x.Id == id)
+            .Select(KnowledgeDocumentMapper.ToTextDtoExpression)
+            .FirstOrDefaultAsync(cancellationToken);
+
     public async Task<KnowledgeDocumentFileDto?> GetFileAsync(Guid apiKeyId, Guid id, CancellationToken cancellationToken = default)
     {
         var document = await dbContext.KnowledgeDocuments.AsNoTracking()
@@ -76,16 +145,53 @@ public class KnowledgeDocumentRepository(
             : null;
     }
 
+    // FileShare.Delete: the background worker reads a file for minutes (OCR), and the document may be deleted
+    // meanwhile. Without it Windows refuses the delete and the file is left behind; with it the file goes as soon as
+    // the reader closes it.
     public async Task<Stream?> OpenFileAsync(Guid apiKeyId, Guid id, CancellationToken cancellationToken = default)
     {
         var file = await GetFileAsync(apiKeyId, id, cancellationToken);
         return file is null
             ? null
-            : new FileStream(file.AbsolutePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true);
+            : new FileStream(file.AbsolutePath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, bufferSize: 81920, useAsync: true);
+    }
+
+    // Files without a row: left behind when a delete couldn't remove the file (OneDrive or a download held it).
+    // Only files older than minAge, because CreateAsync writes the file just before its row.
+    public async Task<int> DeleteOrphanedFilesAsync(TimeSpan minAge, CancellationToken cancellationToken = default)
+    {
+        var folder = GetAbsolutePath(FilesFolder);
+        if (!Directory.Exists(folder))
+        {
+            return 0;
+        }
+
+        var knownFiles = (await dbContext.KnowledgeDocuments.AsNoTracking().Select(x => x.RelativePath).ToListAsync(cancellationToken))
+            .Select(Path.GetFileName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var cutoff = DateTime.UtcNow - minAge;
+        var deleted = 0;
+        foreach (var path in Directory.EnumerateFiles(folder))
+        {
+            var fileName = Path.GetFileName(path);
+            if (fileName.StartsWith('.') || knownFiles.Contains(fileName) || File.GetLastWriteTimeUtc(path) > cutoff)
+            {
+                continue;
+            }
+
+            if (TryDeleteFile($"{FilesFolder}/{fileName}"))
+            {
+                deleted++;
+            }
+        }
+
+        return deleted;
     }
 
     public async Task<KnowledgeDocumentDto?> MarkFailedAsync(Guid id, string errorMessage, CancellationToken cancellationToken = default)
     {
+        // A failed MarkIndexedAsync in the same scope leaves its chunks tracked, and saving them again would fail too.
+        dbContext.ChangeTracker.Clear();
         var entity = await dbContext.KnowledgeDocuments.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
         if (entity is null)
         {
@@ -97,6 +203,44 @@ public class KnowledgeDocumentRepository(
         await dbContext.SaveChangesAsync(cancellationToken);
         return entity.ToDto();
     }
+
+    // Indexes an Indexed document again (new chunks from its current Markdown). The new chunks and vectors are added
+    // and the old ones removed in the same save, so a search never finds the document without chunks.
+    // false = the document doesn't exist.
+    public async Task<bool> ReplaceChunksAsync(Guid id, List<CreateKnowledgeChunkDto> chunks, int indexVersion, CancellationToken cancellationToken = default)
+    {
+        var entity = await dbContext.KnowledgeDocuments.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+        if (entity is null)
+        {
+            return false;
+        }
+
+        var oldChunks = await dbContext.KnowledgeChunks.Where(x => x.KnowledgeDocumentId == id).ToListAsync(cancellationToken);
+        var connection = await GetOpenConnectionAsync(cancellationToken);
+        for (var index = 0; index < chunks.Count; index++)
+        {
+            var vectorRowId = await InsertVectorAsync(connection, chunks[index].Embedding, entity.ApiKeyId, entity.KnowledgeGroupId, cancellationToken);
+            dbContext.KnowledgeChunks.Add(chunks[index].ToEntity(entity, index, vectorRowId));
+        }
+
+        dbContext.KnowledgeChunks.RemoveRange(oldChunks);
+        entity.IndexVersion = indexVersion;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await DeleteVectorsAsync(oldChunks.Select(chunk => chunk.VectorRowId).ToList(), cancellationToken);
+        return true;
+    }
+
+    // Indexed documents whose chunks were made by an older chunker version. Not scoped to a key: the background
+    // worker indexes them again. Not while an LLM is laying out their Markdown; that indexes them when it finishes.
+    public Task<KnowledgeDocumentDto?> GetNextWithOutdatedIndexAsync(int currentVersion, CancellationToken cancellationToken = default) =>
+        dbContext.KnowledgeDocuments.AsNoTracking()
+            .Where(x => x.Status == KnowledgeDocumentStatus.Indexed &&
+                        x.IndexVersion < currentVersion &&
+                        x.MarkdownText != null &&
+                        x.MarkdownSource != KnowledgeMarkdownSource.LlmPending)
+            .OrderBy(x => x.CreatedAt)
+            .Select(KnowledgeDocumentMapper.ToDtoExpression)
+            .FirstOrDefaultAsync(cancellationToken);
 
     public async Task<KnowledgeDocumentDto?> MarkIndexedAsync(Guid id, IndexKnowledgeDocumentDto dto, CancellationToken cancellationToken = default)
     {
@@ -115,21 +259,34 @@ public class KnowledgeDocumentRepository(
         }
 
         entity.ExtractedText = dto.ExtractedText;
+        entity.MarkdownText = dto.Markdown;
+        entity.MarkdownSource = dto.MarkdownNeedsLlm ? KnowledgeMarkdownSource.LlmPending : KnowledgeMarkdownSource.Structure;
+        entity.MarkdownVersion = dto.MarkdownVersion;
+        entity.IndexVersion = dto.IndexVersion;
+        ClearLlmProgress(entity);
         entity.Status = KnowledgeDocumentStatus.Indexed;
         entity.ErrorMessage = null;
         await dbContext.SaveChangesAsync(cancellationToken);
         return entity.ToDto();
     }
 
-    public async Task<List<KnowledgeChunkMatchDto>> SearchAsync(Guid apiKeyId, List<double> embedding, int topK, CancellationToken cancellationToken = default)
+    public async Task<List<KnowledgeChunkMatchDto>> SearchAsync(
+        Guid apiKeyId, List<double> embedding, int topK, Guid? knowledgeGroupId, CancellationToken cancellationToken = default)
     {
         var connection = await GetOpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         // api_key_id is a vec0 partition key, so the KNN search is pre-filtered to the caller's own vectors.
-        command.CommandText = "SELECT rowid, distance FROM vectors.vec_chunks WHERE embedding MATCH $embedding AND k = $k AND api_key_id = $apiKeyId ORDER BY distance;";
+        // group_id is a metadata column, so it filters inside the KNN search too: k matches from that group alone.
+        command.CommandText = knowledgeGroupId is null
+            ? "SELECT rowid, distance FROM vectors.vec_chunks WHERE embedding MATCH $embedding AND k = $k AND api_key_id = $apiKeyId ORDER BY distance;"
+            : "SELECT rowid, distance FROM vectors.vec_chunks WHERE embedding MATCH $embedding AND k = $k AND api_key_id = $apiKeyId AND group_id = $groupId ORDER BY distance;";
         command.Parameters.AddWithValue("$embedding", JsonSerializer.Serialize(embedding));
         command.Parameters.AddWithValue("$k", topK);
         command.Parameters.AddWithValue("$apiKeyId", apiKeyId.ToString());
+        if (knowledgeGroupId is { } groupId)
+        {
+            command.Parameters.AddWithValue("$groupId", groupId.ToString());
+        }
 
         var matches = new List<(long VectorRowId, double Distance)>();
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
@@ -186,6 +343,32 @@ public class KnowledgeDocumentRepository(
         return true;
     }
 
+    // Any other change to the Markdown ends an LLM layout in progress, so its draft is cleared.
+    private async Task<bool> UpdateMarkdownAsync(Guid id, Action<KnowledgeDocument> update, CancellationToken cancellationToken, bool keepLlmProgress = false)
+    {
+        var entity = await dbContext.KnowledgeDocuments.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+        if (entity is null)
+        {
+            return false;
+        }
+
+        if (!keepLlmProgress)
+        {
+            ClearLlmProgress(entity);
+        }
+
+        update(entity);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return true;
+    }
+
+    private static void ClearLlmProgress(KnowledgeDocument entity)
+    {
+        entity.MarkdownLlmDraft = null;
+        entity.MarkdownLlmPartsDone = null;
+        entity.MarkdownLlmPartsTotal = null;
+    }
+
     private IQueryable<KnowledgeDocument> Filter(Guid apiKeyId, Guid? knowledgeGroupId)
     {
         var query = dbContext.KnowledgeDocuments.AsNoTracking().Where(x => x.ApiKeyId == apiKeyId);
@@ -237,17 +420,20 @@ public class KnowledgeDocumentRepository(
         Path.Combine(environment.ContentRootPath, "app_files", relativePath);
 
     // Best-effort: the row is already gone and is the source of truth. Under OneDrive-synced folders the
-    // sync driver can briefly lock a file, so a failed delete is logged instead of failing the request.
-    private void TryDeleteFile(string relativePath)
+    // sync driver can briefly lock a file, so a failed delete is logged instead of failing the request;
+    // KnowledgeFileCleanupWorker removes the file later (DeleteOrphanedFilesAsync).
+    private bool TryDeleteFile(string relativePath)
     {
         var absolutePath = GetAbsolutePath(relativePath);
         try
         {
             File.Delete(absolutePath);
+            return true;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             logger.LogWarning(exception, "Failed to delete knowledge document file {FilePath}", absolutePath);
+            return false;
         }
     }
 }

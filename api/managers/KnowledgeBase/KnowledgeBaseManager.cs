@@ -18,9 +18,20 @@ public partial class KnowledgeBaseManager(
     IKnowledgeDocumentRepository knowledgeDocumentRepository,
     IOllamaService ollamaService,
     ITesseractService tesseractService,
+    KnowledgeDocumentProcessingSignal processingSignal,
     IOptions<KnowledgeBaseSettings> options,
     ILogger<KnowledgeBaseManager> logger) : IKnowledgeBaseManager
 {
+    private const string RagContextInstructions =
+        """
+        Answer the user's question using only the context below, in the same language as the question.
+        Each part of the context starts with its number and source file; its text may start with the headings of the section it comes from, which tell you what the text is about (for example which note or date it belongs to).
+        Cite the parts you use by their number, like [1] or [2][3].
+        If the context does not contain the answer, say so plainly instead of guessing.
+        """;
+
+    // Only stores the file. Extraction, embedding and indexing happen in KnowledgeDocumentProcessingWorker
+    // (ProcessNextDocumentAsync), so the returned document has Status "Processing".
     public async Task<UploadDocumentResultDto> UploadDocumentAsync(UploadDocumentDto dto, CancellationToken cancellationToken = default)
     {
         var settings = options.Value;
@@ -34,7 +45,7 @@ public partial class KnowledgeBaseManager(
             return new UploadDocumentResultDto { Outcome = UploadDocumentOutcome.TooLarge };
         }
 
-        if (!DocumentTextExtractor.IsSupported(dto.FileName))
+        if (await DocumentTextExtractor.DetectKindAsync(dto.Content, dto.FileName, cancellationToken) == DocumentKind.Unsupported)
         {
             return new UploadDocumentResultDto { Outcome = UploadDocumentOutcome.UnsupportedFileType };
         }
@@ -50,33 +61,154 @@ public partial class KnowledgeBaseManager(
             Content = dto.Content
         }, cancellationToken);
 
-        // Extraction, embedding (Ollama) and indexing all fail the same way: the document is kept with Status
-        // "Failed" and the reason, so it never stays "Processing". HttpClient timeouts are also
-        // OperationCanceledException, so only the caller's own cancellation is let through.
+        processingSignal.Notify();
+        return new UploadDocumentResultDto { Outcome = UploadDocumentOutcome.Uploaded, Document = document };
+    }
+
+    public async Task<bool> ProcessNextDocumentAsync(CancellationToken cancellationToken = default)
+    {
+        if (await knowledgeDocumentRepository.GetNextProcessingAsync(cancellationToken) is { } document)
+        {
+            await ProcessDocumentAsync(document, cancellationToken);
+            return true;
+        }
+
+        // New uploads first. Then documents whose Markdown is missing or made by an older converter version get it
+        // again, one at a time.
+        if (await knowledgeDocumentRepository.GetNextWithOutdatedMarkdownAsync(MarkdownFormatter.Version, cancellationToken) is { } outdated)
+        {
+            await RemakeMarkdownAsync(outdated, cancellationToken);
+            return true;
+        }
+
+        // Last, documents whose chunks were made by an older chunker version are indexed again from their Markdown.
+        if (await knowledgeDocumentRepository.GetNextWithOutdatedIndexAsync(MarkdownChunker.Version, cancellationToken) is { } outdatedIndex)
+        {
+            await ReindexOutdatedAsync(outdatedIndex, cancellationToken);
+            return true;
+        }
+
+        return false;
+    }
+
+    // Only the Markdown is stored; the indexed text, chunks and vectors are left as they are. If the file can't be
+    // read again, the stored text is used as Markdown, so the document is never retried.
+    private async Task RemakeMarkdownAsync(KnowledgeDocumentDto document, CancellationToken cancellationToken)
+    {
+        string markdown;
+        var needsLlm = false;
         try
         {
-            string text;
-            await using (var fileStream = await knowledgeDocumentRepository.OpenFileAsync(dto.ApiKeyId, document.Id, cancellationToken)
-                ?? throw new InvalidOperationException("The stored file could not be opened."))
-            {
-                text = await ExtractTextAsync(fileStream, dto.FileName, document.Id, cancellationToken);
-            }
+            var extracted = await ExtractStoredDocumentAsync(document, cancellationToken);
+            markdown = extracted.Markdown;
+            needsLlm = NeedsLlmMarkdown(extracted);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning(exception, "Markdown for knowledge document {DocumentId} fell back to its stored text", document.Id);
+            var stored = await knowledgeDocumentRepository.GetTextAsync(document.ApiKeyId, document.Id, cancellationToken);
+            markdown = MarkdownFormatter.FromPlainText(stored?.ExtractedText ?? string.Empty);
+        }
+
+        if (await knowledgeDocumentRepository.SetMarkdownAsync(document.Id, markdown, needsLlm, MarkdownFormatter.Version, cancellationToken))
+        {
+            logger.LogInformation("Made Markdown version {Version} for knowledge document {DocumentId}", MarkdownFormatter.Version, document.Id);
+
+            // The index follows the Markdown. If this fails, the document's IndexVersion stays old and it's tried again.
+            await ReindexAsync(document.Id, markdown, cancellationToken);
+        }
+    }
+
+    // New chunks from the document's current Markdown, embedded and swapped in for the old ones. Only embeddings; the
+    // file isn't read again.
+    private async Task ReindexAsync(Guid documentId, string markdown, CancellationToken cancellationToken)
+    {
+        var chunks = await EmbedChunksAsync(ChunkForIndex(markdown, null), cancellationToken);
+        if (chunks.Count > 0 && await knowledgeDocumentRepository.ReplaceChunksAsync(documentId, chunks, MarkdownChunker.Version, cancellationToken))
+        {
+            logger.LogInformation("Indexed knowledge document {DocumentId} again from its Markdown: {ChunkCount} chunks", documentId, chunks.Count);
+        }
+    }
+
+    // Documents indexed with an older chunker version (or from the raw text) are indexed again from their Markdown.
+    // The version is always updated, also when there is nothing to chunk, so the worker never picks it again.
+    private async Task ReindexOutdatedAsync(KnowledgeDocumentDto document, CancellationToken cancellationToken)
+    {
+        var markdown = (await knowledgeDocumentRepository.GetMarkdownAsync(document.ApiKeyId, document.Id, cancellationToken))?.MarkdownText ?? string.Empty;
+        var fallbackText = string.IsNullOrWhiteSpace(markdown)
+            ? (await knowledgeDocumentRepository.GetTextAsync(document.ApiKeyId, document.Id, cancellationToken))?.ExtractedText
+            : null;
+
+        var chunks = await EmbedChunksAsync(ChunkForIndex(markdown, fallbackText), cancellationToken);
+        if (await knowledgeDocumentRepository.ReplaceChunksAsync(document.Id, chunks, MarkdownChunker.Version, cancellationToken))
+        {
+            logger.LogInformation("Indexed knowledge document {DocumentId} again from its Markdown: {ChunkCount} chunks", document.Id, chunks.Count);
+        }
+    }
+
+    // Chunks along the Markdown's structure (see MarkdownChunker). Plain text is only the fallback for a document
+    // whose Markdown came out empty.
+    private List<string> ChunkForIndex(string markdown, string? fallbackText)
+    {
+        var settings = options.Value;
+        if (!string.IsNullOrWhiteSpace(markdown))
+        {
+            return MarkdownChunker.Chunk(markdown, settings.ChunkSizeCharacters, settings.ChunkOverlapCharacters);
+        }
+
+        return string.IsNullOrWhiteSpace(fallbackText) ? [] : ChunkText(fallbackText, settings.ChunkSizeCharacters, settings.ChunkOverlapCharacters);
+    }
+
+    private async Task<List<CreateKnowledgeChunkDto>> EmbedChunksAsync(List<string> chunks, CancellationToken cancellationToken)
+    {
+        if (chunks.Count == 0)
+        {
+            return [];
+        }
+
+        var embeddings = await ollamaService.EmbedAsync(new EmbedRequestDto { Model = options.Value.EmbeddingModel, Input = chunks }, cancellationToken);
+        return chunks.Select((chunk, index) => new CreateKnowledgeChunkDto { Text = chunk, Embedding = embeddings.Embeddings[index] }).ToList();
+    }
+
+    private async Task<ExtractedDocumentDto> ExtractStoredDocumentAsync(KnowledgeDocumentDto document, CancellationToken cancellationToken)
+    {
+        await using var fileStream = await knowledgeDocumentRepository.OpenFileAsync(document.ApiKeyId, document.Id, cancellationToken)
+            ?? throw new InvalidOperationException("The stored file could not be opened.");
+        return await ExtractDocumentAsync(fileStream, document.OriginalFileName, document.Id, cancellationToken);
+    }
+
+    // Extraction, embedding (Ollama) and indexing all fail the same way: the document is kept with Status
+    // "Failed" and the reason, so it never stays "Processing". HttpClient timeouts are also
+    // OperationCanceledException, so only the worker's own cancellation (shutdown) is let through. The document
+    // then stays "Processing" and is picked up again on the next start.
+    private async Task ProcessDocumentAsync(KnowledgeDocumentDto document, CancellationToken cancellationToken)
+    {
+        var settings = options.Value;
+        try
+        {
+            var extracted = await ExtractStoredDocumentAsync(document, cancellationToken);
+            var text = extracted.Text;
 
             if (string.IsNullOrWhiteSpace(text))
             {
                 throw new InvalidOperationException("No extractable text was found in the file.");
             }
 
-            var chunks = ChunkText(text, settings.ChunkSizeCharacters, settings.ChunkOverlapCharacters);
-            var embeddings = await ollamaService.EmbedAsync(new EmbedRequestDto { Model = settings.EmbeddingModel, Input = chunks }, cancellationToken);
+            var chunks = await EmbedChunksAsync(ChunkForIndex(extracted.Markdown, text), cancellationToken);
 
-            var indexed = await knowledgeDocumentRepository.MarkIndexedAsync(document.Id, new IndexKnowledgeDocumentDto
+            // null = the document was deleted while it was being processed.
+            if (await knowledgeDocumentRepository.MarkIndexedAsync(document.Id, new IndexKnowledgeDocumentDto
+                {
+                    ExtractedText = text,
+                    Markdown = extracted.Markdown,
+                    MarkdownNeedsLlm = NeedsLlmMarkdown(extracted),
+                    MarkdownVersion = MarkdownFormatter.Version,
+                    IndexVersion = MarkdownChunker.Version,
+                    Chunks = chunks
+                }, cancellationToken) is not null)
             {
-                ExtractedText = text,
-                Chunks = chunks.Select((chunk, index) => new CreateKnowledgeChunkDto { Text = chunk, Embedding = embeddings.Embeddings[index] }).ToList()
-            }, cancellationToken);
-
-            return new UploadDocumentResultDto { Outcome = UploadDocumentOutcome.Uploaded, Document = indexed ?? document };
+                logger.LogInformation("Indexed knowledge document {DocumentId}: {ChunkCount} chunks", document.Id, chunks.Count);
+            }
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -84,8 +216,7 @@ public partial class KnowledgeBaseManager(
 
             // ErrorMessage is shown to the caller. A connection error's own message names Ollama's internal host and port.
             var reason = exception is HttpRequestException ? "The embedding service (Ollama) could not be reached." : exception.Message;
-            var failed = await knowledgeDocumentRepository.MarkFailedAsync(document.Id, reason, cancellationToken);
-            return new UploadDocumentResultDto { Outcome = UploadDocumentOutcome.Uploaded, Document = failed ?? document };
+            await knowledgeDocumentRepository.MarkFailedAsync(document.Id, reason, cancellationToken);
         }
     }
 
@@ -105,28 +236,38 @@ public partial class KnowledgeBaseManager(
         return await knowledgeGroupRepository.DeleteAsync(apiKeyId, knowledgeGroupId, cancellationToken);
     }
 
-    // Always spans every group/document the calling key owns, never just one group.
-    public async Task<List<KnowledgeChunkMatchDto>> SearchAsync(Guid apiKeyId, string query, int? topK, CancellationToken cancellationToken = default)
+    // Without knowledgeGroupId it spans every group/document the calling key owns. null = the group doesn't exist.
+    public async Task<List<KnowledgeChunkMatchDto>?> SearchAsync(
+        Guid apiKeyId, string query, int? topK, Guid? knowledgeGroupId, CancellationToken cancellationToken = default)
     {
-        var settings = options.Value;
-        var embeddings = await ollamaService.EmbedAsync(new EmbedRequestDto { Model = settings.EmbeddingModel, Input = [query] }, cancellationToken);
-        return await knowledgeDocumentRepository.SearchAsync(apiKeyId, embeddings.Embeddings[0], topK is > 0 ? topK.Value : settings.DefaultTopK, cancellationToken);
+        if (knowledgeGroupId is { } groupId && await knowledgeGroupRepository.GetByIdAsync(apiKeyId, groupId, cancellationToken) is null)
+        {
+            return null;
+        }
+
+        return await FindMatchesAsync(apiKeyId, query, topK, knowledgeGroupId, cancellationToken);
     }
 
-    public async Task<RagChatResultDto> RagChatAsync(RagChatDto dto, CancellationToken cancellationToken = default)
+    // Without KnowledgeGroupId retrieval spans every group the calling key owns. null = the group doesn't exist.
+    public async Task<RagChatResultDto?> RagChatAsync(RagChatDto dto, CancellationToken cancellationToken = default)
     {
         // RagChatKnowledgeBaseRequestDto validates that a user message exists, so this is unexpected here.
         var lastUserMessage = dto.Messages.LastOrDefault(message => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException("Messages must include at least one message with role 'user'.");
 
         // Retrieval uses only the latest user message, so stale context from earlier turns can't leak in.
-        var matches = await SearchAsync(dto.ApiKeyId, lastUserMessage.Content, dto.TopK, cancellationToken);
+        var matches = await SearchAsync(dto.ApiKeyId, lastUserMessage.Content, dto.TopK, dto.KnowledgeGroupId, cancellationToken);
+        if (matches is null)
+        {
+            return null;
+        }
 
+        // Each part names its file, and its text starts with the headings of the section it comes from (MarkdownChunker),
+        // so the model can tell parts of different documents and entries apart.
         var systemPrompt = matches.Count > 0
-            ? "Answer the user's question using only the following context. Cite sources by their [n] number." +
-              Environment.NewLine + Environment.NewLine +
-              string.Join(Environment.NewLine + Environment.NewLine, matches.Select((match, index) => $"[{index + 1}] {match.Text}"))
-            : "No relevant context was found in the knowledge base. Answer based on general knowledge and say so.";
+            ? RagContextInstructions + "\n\n" +
+              string.Join("\n\n", matches.Select((match, index) => $"[{index + 1}] Source: {match.OriginalFileName}\n{match.Text}"))
+            : "No relevant context was found in the knowledge base. Answer based on general knowledge, in the same language as the question, and say that the knowledge base had nothing on it.";
 
         // The fresh system message replaces any system message the caller sent; everything else is forwarded as-is.
         var messages = new List<MessageDto> { new() { Role = "system", Content = systemPrompt } };
@@ -151,6 +292,15 @@ public partial class KnowledgeBaseManager(
             EvalDuration = chat.EvalDuration,
             Sources = matches
         };
+    }
+
+    private async Task<List<KnowledgeChunkMatchDto>> FindMatchesAsync(
+        Guid apiKeyId, string query, int? topK, Guid? knowledgeGroupId, CancellationToken cancellationToken)
+    {
+        var settings = options.Value;
+        var embeddings = await ollamaService.EmbedAsync(new EmbedRequestDto { Model = settings.EmbeddingModel, Input = [query] }, cancellationToken);
+        return await knowledgeDocumentRepository.SearchAsync(
+            apiKeyId, embeddings.Embeddings[0], topK is > 0 ? topK.Value : settings.DefaultTopK, knowledgeGroupId, cancellationToken);
     }
 
     private static List<string> ChunkText(string text, int chunkSize, int overlap)

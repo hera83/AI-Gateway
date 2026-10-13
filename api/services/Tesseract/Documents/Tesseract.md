@@ -8,7 +8,7 @@
 ## Metoder
 | Metode | Kommando | Beskrivelse |
 |---|---|---|
-| `RecognizeAsync(RecognizeRequestDto request)` | `tesseract stdin stdout -l <sprog> --psm <n> --dpi <n> -c tessedit_create_tsv=1` | OCR af ét billede (PNG, JPEG, TIFF …). Returnerer ordene (TSV level 5) i læserækkefølge med blok-, afsnits- og linjenummer, position og confidence. |
+| `RecognizeAsync(RecognizeRequestDto request)` | `tesseract stdin stdout -l <sprog> --psm <n> [--dpi <n>] -c tessedit_create_tsv=1` | OCR af ét billede (PNG, JPEG, TIFF, BMP, GIF, WebP, JPEG 2000, PNM). Returnerer ordene (TSV level 5) i læserækkefølge med side-, blok-, afsnits- og linjenummer, position og confidence. En TIFF med flere sider giver ord fra alle sider. `--dpi` sendes kun, når `Dpi` er sat. |
 
 ## Filer
 ```text
@@ -28,5 +28,7 @@ services/Tesseract/
 - Brug `tessdata_best`. Med standardmodellerne bliver æ, ø og å ofte til "ae", "o" og "a", så snart `eng` er indlæst sammen med `dan`.
 - TSV slås til med `-c tessedit_create_tsv=1` og ikke med config-filen `tsv`. Den fil mangler i en selvbygget tessdata-mappe, og så giver Tesseract stille almindelig tekst i stedet.
 - `--psm 1` (med orienteringsgenkendelse) kræver `osd.traineddata` i samme mappe som sprogmodellerne.
+- Blok-, afsnits- og linjenumre starter forfra på hver side i en flersidet TIFF. Gruppér altid på `PageNumber` først.
+- Uden `Dpi` bruger Tesseract billedets egen opløsning og estimerer den ud fra tekststørrelsen, hvis billedet ikke har nogen ("Estimating resolution as …" på stderr). Det er det rigtige for fotos og skærmbilleder. Renderede PDF-sider skal have `Dpi` sat.
 - `OMP_THREAD_LIMIT=1` sættes på processen, fordi kalderen selv kører flere sider parallelt.
 - Kan programmet ikke startes, eller ender det med en exit-kode forskellig fra 0, kastes `InvalidOperationException` med Tesseracts stderr. En timeout giver `TimeoutException`, og processen bliver dræbt.

@@ -17,6 +17,9 @@ public class RagChatKnowledgeBaseRequestDto : IValidatableObject
     [Range(1, 100)]
     public int? TopK { get; set; }
 
+    // Optional: only retrieve context from documents in this group. Without it, every group the key owns is searched.
+    public Guid? GroupId { get; set; }
+
     public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
     {
         if (!Messages.Any(message => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase)))

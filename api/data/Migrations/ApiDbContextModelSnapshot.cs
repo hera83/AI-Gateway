@@ -171,8 +171,32 @@ namespace api.data.Migrations
                         .HasMaxLength(100000000)
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("IndexVersion")
+                        .HasColumnType("INTEGER");
+
                     b.Property<Guid>("KnowledgeGroupId")
                         .HasColumnType("TEXT");
+
+                    b.Property<string>("MarkdownLlmDraft")
+                        .HasMaxLength(100000000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("MarkdownLlmPartsDone")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("MarkdownLlmPartsTotal")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("MarkdownSource")
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MarkdownText")
+                        .HasMaxLength(100000000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("MarkdownVersion")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("OriginalFileName")
                         .IsRequired()

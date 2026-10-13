@@ -82,7 +82,8 @@ x-api-key: {{StandardKey}}
 DELETE {{Host}}/KnowledgeBase/DeleteGroup/{{GroupId}}
 x-api-key: {{StandardKey}}
 
-### Knowledge base: upload a document (txt/md/pdf/docx); extracted, chunked, embedded and indexed synchronously
+### Knowledge base: upload a document (any plain-text file, pdf, docx or an image: png/jpg/tiff/bmp/gif/webp/jp2/pnm). Answers 202 with status "Processing"; a background worker
+### extracts, chunks, embeds and indexes it. Follow the Location header (GetDocumentText) until status is "Indexed".
 POST {{Host}}/KnowledgeBase/UploadDocument
 x-api-key: {{StandardKey}}
 Content-Type: multipart/form-data; boundary=AiGatewayBoundary
@@ -106,6 +107,16 @@ x-api-key: {{StandardKey}}
 GET {{Host}}/KnowledgeBase/DownloadDocument/{{DocumentId}}
 x-api-key: {{StandardKey}}
 
+### Knowledge base: get all text extracted from a document (text is null until status is "Indexed")
+GET {{Host}}/KnowledgeBase/GetDocumentText/{{DocumentId}}
+x-api-key: {{StandardKey}}
+
+### Knowledge base: the document as a Markdown file (text/markdown, <name>.md; 409 until "Indexed").
+### Header X-Markdown-Source: "Structure", "LlmPending" (mostly OCR text; an LLM lays it out better shortly) or "Llm".
+### Header X-Markdown-Llm-Progress: how far the LLM has got, e.g. "12/50", while it works.
+GET {{Host}}/KnowledgeBase/ExportDocumentMarkdown/{{DocumentId}}
+x-api-key: {{StandardKey}}
+
 ### Knowledge base: delete a document
 DELETE {{Host}}/KnowledgeBase/DeleteDocument/{{DocumentId}}
 x-api-key: {{StandardKey}}
@@ -120,7 +131,18 @@ Content-Type: application/json
   "topK": 5
 }
 
+### Knowledge base: search only one group (404 if the group doesn't exist)
+POST {{Host}}/KnowledgeBase/Search
+x-api-key: {{StandardKey}}
+Content-Type: application/json
+
+{
+  "query": "What is in the example content?",
+  "groupId": "{{GroupId}}"
+}
+
 ### Knowledge base: RAG chat. Resend the whole conversation each turn; retrieval uses the latest user message.
+### Add "groupId" to retrieve context from one group only (404 if the group doesn't exist).
 POST {{Host}}/KnowledgeBase/RagChat
 x-api-key: {{StandardKey}}
 Content-Type: application/json
@@ -131,6 +153,21 @@ Content-Type: application/json
     { "role": "user", "content": "What is in the example content?" }
   ],
   "topK": 5
+}
+
+### Knowledge base: research agent. Asks questions back while the task is unclear (status "NeedsClarification"):
+### add its "message" and your answer to "messages" and send again. Otherwise it searches in rounds and answers
+### (status "Answered") in Markdown citing "sources" as [n]. "skipClarification": true researches at once.
+POST {{Host}}/KnowledgeBase/AgentChat
+x-api-key: {{StandardKey}}
+Content-Type: application/json
+
+{
+  "model": "qwen2.5:14b-instruct",
+  "messages": [
+    { "role": "user", "content": "Hvorfor fik familien en ny insulinpumpe?" }
+  ],
+  "skipClarification": false
 }
 
 ### Ollama: version (any key)

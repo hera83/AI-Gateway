@@ -16,6 +16,7 @@ public class SpeachesController(ISpeachesService speachesService) : ControllerBa
     }
 
     [HttpPost]
+    [Consumes("multipart/form-data")]
     public async Task<ActionResult<TranscribeSpeachesResponseDto>> Transcribe([FromForm] TranscribeSpeachesRequestDto request, CancellationToken cancellationToken)
     {
         var response = await speachesService.TranscribeAsync(request.ToTranscriptionRequestDto(), cancellationToken);
@@ -42,6 +43,7 @@ public class SpeachesController(ISpeachesService speachesService) : ControllerBa
     }
 
     [HttpPost]
+    [Consumes("multipart/form-data")]
     public async Task<ActionResult<TranslateSpeachesResponseDto>> Translate([FromForm] TranslateSpeachesRequestDto request, CancellationToken cancellationToken)
     {
         var response = await speachesService.TranslateAsync(request.ToTranslationRequestDto(), cancellationToken);
@@ -131,6 +133,7 @@ public class SpeachesController(ISpeachesService speachesService) : ControllerBa
     }
 
     [HttpPost]
+    [Consumes("multipart/form-data")]
     public async Task<ActionResult<CreateSpeechEmbeddingSpeachesResponseDto>> CreateSpeechEmbedding([FromForm] CreateSpeechEmbeddingSpeachesRequestDto request, CancellationToken cancellationToken)
     {
         var response = await speachesService.CreateSpeechEmbeddingAsync(request.ToSpeechEmbeddingRequestDto(), cancellationToken);
@@ -138,6 +141,7 @@ public class SpeachesController(ISpeachesService speachesService) : ControllerBa
     }
 
     [HttpPost]
+    [Consumes("multipart/form-data")]
     public async Task<ActionResult<List<DetectSpeechTimestampsSpeachesResponseDto>>> DetectSpeechTimestamps([FromForm] DetectSpeechTimestampsSpeachesRequestDto request, CancellationToken cancellationToken)
     {
         var timestamps = await speachesService.DetectSpeechTimestampsAsync(request.ToSpeechTimestampsRequestDto(), cancellationToken);
@@ -145,6 +149,7 @@ public class SpeachesController(ISpeachesService speachesService) : ControllerBa
     }
 
     [HttpPost]
+    [Consumes("multipart/form-data")]
     public async Task<ActionResult<DiarizeSpeachesResponseDto>> Diarize([FromForm] DiarizeSpeachesRequestDto request, CancellationToken cancellationToken)
     {
         var response = await speachesService.DiarizeAsync(request.ToDiarizationRequestDto(), cancellationToken);

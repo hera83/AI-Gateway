@@ -4,7 +4,8 @@ using api.Services.Tesseract.Dtos.Recognize;
 
 namespace api.Managers.KnowledgeBase;
 
-// Text extraction for uploads. A PDF page keeps its own text layer when it is real text, and Tesseract OCR
+// Text extraction for uploads. Text files and Word documents are read directly (DocumentTextExtractor), and image
+// files are OCR'ed page by page. A PDF page keeps its own text layer when it is real text, and Tesseract OCR
 // fills in what the layer lacks: scanned pages, pages whose fonts give garbage, and text inside images.
 // Every OCR result is quality-checked first (see OcrTextBuilder), so unreadable output never gets indexed.
 public partial class KnowledgeBaseManager
@@ -24,22 +25,143 @@ public partial class KnowledgeBaseManager
     // Same, plus orientation detection (needs osd.traineddata). Slower, so only a retry for rejected whole pages.
     private const int AutomaticPageSegmentationWithOrientation = 1;
 
-    private async Task<string> ExtractTextAsync(Stream fileStream, string fileName, Guid documentId, CancellationToken cancellationToken)
+    // Plain text for chunking and Markdown for reading, from the same pass, so the two always hold the same content.
+    private async Task<ExtractedDocumentDto> ExtractDocumentAsync(Stream fileStream, string fileName, Guid documentId, CancellationToken cancellationToken)
     {
-        if (!DocumentTextExtractor.IsPdf(fileName))
+        var kind = await DocumentTextExtractor.DetectKindAsync(fileStream, fileName, cancellationToken);
+        switch (kind)
         {
-            return await DocumentTextExtractor.ExtractTextAsync(fileStream, fileName, cancellationToken);
+            case DocumentKind.Pdf:
+                return await ExtractPdfAsync(fileStream, documentId, cancellationToken);
+            case DocumentKind.Image:
+                return await ExtractImageAsync(fileStream, documentId, cancellationToken);
+            case DocumentKind.Unsupported:
+                throw new InvalidOperationException("The file type is not supported.");
         }
 
+        var text = await DocumentTextExtractor.ExtractTextAsync(fileStream, kind, cancellationToken);
+        var markdown = BuildMarkdown(() =>
+        {
+            if (kind != DocumentKind.Docx)
+            {
+                return TextMarkdownConverter.Convert(text, fileName);
+            }
+
+            fileStream.Position = 0;
+            return DocxMarkdownConverter.Convert(fileStream);
+        }, text, documentId);
+
+        return new ExtractedDocumentDto { Text = text, Markdown = markdown, OcrShare = 0 };
+    }
+
+    // The Markdown is a nicer view of the same text, so a converter bug may never fail the upload: the plain
+    // text is used as Markdown instead.
+    private string BuildMarkdown(Func<string> convert, string text, Guid documentId)
+    {
+        try
+        {
+            return convert();
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Markdown for knowledge document {DocumentId} fell back to plain text", documentId);
+            return MarkdownFormatter.FromPlainText(text);
+        }
+    }
+
+    // Every page of the image (a TIFF can have several) is quality-checked on its own, like a scanned PDF page.
+    // No DPI is passed: photos and screenshots have none that fits, so Tesseract uses the image's own or estimates it.
+    private async Task<ExtractedDocumentDto> ExtractImageAsync(Stream fileStream, Guid documentId, CancellationToken cancellationToken)
+    {
+        var ocrSettings = options.Value.Ocr;
+        if (!ocrSettings.Enabled)
+        {
+            throw new InvalidOperationException("Text can't be read from images, because OCR is turned off (KnowledgeBase:Ocr:Enabled).");
+        }
+
+        byte[] image;
+        using (var memory = new MemoryStream())
+        {
+            await fileStream.CopyToAsync(memory, cancellationToken);
+            image = memory.ToArray();
+        }
+
+        var pages = await RecognizeImagePagesAsync(image, AutomaticPageSegmentation, ocrSettings, cancellationToken);
+
+        // Upside-down scans read as garbage and get rejected; orientation detection turns them the right way round.
+        if (pages.Values.Any(page => !page.IsAccepted && page.RecognizedWordCount > 0))
+        {
+            var retry = await RecognizeImagePagesAsync(image, AutomaticPageSegmentationWithOrientation, ocrSettings, cancellationToken);
+            foreach (var (number, page) in retry)
+            {
+                if (page.IsAccepted && pages.TryGetValue(number, out var first) && !first.IsAccepted)
+                {
+                    pages[number] = page;
+                }
+            }
+        }
+
+        var accepted = pages.OrderBy(page => page.Key).Select(page => page.Value).Where(page => page.IsAccepted).ToList();
+        logger.LogInformation(
+            "Extracted image document {DocumentId}: {PageCount} pages with text, {AcceptedCount} OCR results used, {RejectedCount} rejected as unreadable",
+            documentId,
+            pages.Count,
+            accepted.Count,
+            pages.Count - accepted.Count);
+
+        if (accepted.Count == 0)
+        {
+            var reason = pages.Values.Select(page => page.RejectionReason).FirstOrDefault() ?? "no text recognized";
+            throw new InvalidOperationException($"No readable text was found in the image ({reason}).");
+        }
+
+        var text = JoinBlocks(accepted.Select(page => page.Text));
+        var markdown = BuildMarkdown(() =>
+        {
+            var blocks = new List<(string Markdown, bool IsListItem)>();
+            foreach (var page in MarkdownFormatter.RemoveRepeatedPageLines(accepted.Select(page => page.Text).ToList()))
+            {
+                MarkdownFormatter.AppendPlainText(blocks, page);
+            }
+
+            return MarkdownFormatter.Join(blocks);
+        }, text, documentId);
+
+        return new ExtractedDocumentDto { Text = text, Markdown = markdown, OcrShare = 1 };
+    }
+
+    // Tesseract numbers blocks, paragraphs and lines per page, so the words are split by page before OcrTextBuilder.
+    private async Task<Dictionary<int, OcrTextResultDto>> RecognizeImagePagesAsync(
+        byte[] image,
+        int pageSegmentationMode,
+        KnowledgeBaseOcrSettings ocrSettings,
+        CancellationToken cancellationToken)
+    {
+        var response = await tesseractService.RecognizeAsync(new RecognizeRequestDto
+        {
+            Image = image,
+            Languages = ocrSettings.Languages,
+            PageSegmentationMode = pageSegmentationMode
+        }, cancellationToken);
+
+        return response.Words
+            .GroupBy(word => word.PageNumber)
+            .ToDictionary(page => page.Key, page => OcrTextBuilder.Build(page.ToList(), ocrSettings));
+    }
+
+    private async Task<ExtractedDocumentDto> ExtractPdfAsync(Stream fileStream, Guid documentId, CancellationToken cancellationToken)
+    {
         var ocrSettings = options.Value.Ocr;
         var pages = DocumentTextExtractor.ReadPdfPages(fileStream);
         if (!ocrSettings.Enabled)
         {
-            return JoinBlocks(pages.Select(page => page.Text));
+            var layerOnly = pages.Select(page => new PdfPageTextDto { Text = page.Text, UsesTextLayer = true }).ToList();
+            return ToExtractedPdf(pages, layerOnly, documentId);
         }
 
         var pageTexts = await ExtractPdfPagesWithOcrAsync(fileStream, pages, ocrSettings, cancellationToken);
-        var text = JoinBlocks(pageTexts.Select(page => page.Text));
+        var extracted = ToExtractedPdf(pages, pageTexts, documentId);
+        var text = extracted.Text;
         var ocrErrors = pageTexts.SelectMany(page => page.OcrErrors).ToList();
 
         logger.LogInformation(
@@ -61,7 +183,19 @@ public partial class KnowledgeBaseManager
             throw new InvalidOperationException($"No extractable text was found in the file, and OCR failed: {ocrErrors[0]}");
         }
 
-        return text;
+        return extracted;
+    }
+
+    private ExtractedDocumentDto ToExtractedPdf(List<PdfPageDto> pages, IReadOnlyList<PdfPageTextDto> pageTexts, Guid documentId)
+    {
+        var text = JoinBlocks(pageTexts.Select(page => page.Text));
+        var ocrCharacters = pageTexts.Sum(page => page.OcrTexts.Sum(ocrText => ocrText.Length));
+        return new ExtractedDocumentDto
+        {
+            Text = text,
+            Markdown = BuildMarkdown(() => PdfMarkdownConverter.Render(pages, pageTexts), text, documentId),
+            OcrShare = text.Length == 0 ? 0 : Math.Min(1, (double)ocrCharacters / text.Length)
+        };
     }
 
     private static string JoinBlocks(IEnumerable<string> blocks) =>
@@ -94,7 +228,7 @@ public partial class KnowledgeBaseManager
 
             if (regions.Count == 0)
             {
-                pageTasks.Add(Task.FromResult(new PdfPageTextDto { Text = page.Text }));
+                pageTasks.Add(Task.FromResult(new PdfPageTextDto { Text = page.Text, UsesTextLayer = true }));
                 continue;
             }
 
@@ -113,6 +247,7 @@ public partial class KnowledgeBaseManager
                 pageTasks.Add(Task.FromResult(new PdfPageTextDto
                 {
                     Text = isGarbled ? string.Empty : page.Text,
+                    UsesTextLayer = !isGarbled,
                     OcrErrors = [$"Page {page.Number} could not be rendered: {exception.Message}"]
                 }));
                 continue;
@@ -163,7 +298,7 @@ public partial class KnowledgeBaseManager
     {
         try
         {
-            var result = new PdfPageTextDto { IsWholePageOcr = isWholePage };
+            var result = new PdfPageTextDto { IsWholePageOcr = isWholePage, UsesTextLayer = !isWholePage };
             var parts = new List<string>();
             if (!isWholePage)
             {
@@ -208,6 +343,7 @@ public partial class KnowledgeBaseManager
                 }
 
                 result.OcrAccepted++;
+                result.OcrTexts.Add(ocr.Text);
                 parts.Add(ocr.Text);
             }
 
@@ -215,6 +351,7 @@ public partial class KnowledgeBaseManager
             // a stamp), but never a garbled layer.
             if (isWholePage && result.OcrAccepted == 0 && !isGarbled)
             {
+                result.UsesTextLayer = true;
                 parts.Add(page.Text);
             }
 

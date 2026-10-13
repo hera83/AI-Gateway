@@ -10,4 +10,7 @@ public class RagChatDto
     public List<RagChatMessageDto> Messages { get; set; } = [];
 
     public int? TopK { get; set; }
+
+    // Optional: only retrieve context from this group.
+    public Guid? KnowledgeGroupId { get; set; }
 }

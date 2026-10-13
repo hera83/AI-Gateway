@@ -7,6 +7,7 @@ using api.Repositories.KnowledgeDocuments.Interfaces;
 using api.Repositories.KnowledgeGroups.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Net.Http.Headers;
 
 namespace api.Controllers;
 
@@ -20,6 +21,9 @@ public class KnowledgeBaseController(
     IKnowledgeGroupRepository knowledgeGroupRepository,
     IKnowledgeDocumentRepository knowledgeDocumentRepository) : ControllerBase
 {
+    private const string MarkdownSourceHeader = "X-Markdown-Source";
+    private const string MarkdownLlmProgressHeader = "X-Markdown-Llm-Progress";
+
     private Guid ApiKeyId => Guid.Parse(User.FindFirstValue(ApiKeyClaimTypes.KeyId)!);
 
     [HttpPost]
@@ -49,25 +53,32 @@ public class KnowledgeBaseController(
     public async Task<IActionResult> DeleteGroup(Guid id, CancellationToken cancellationToken) =>
         await knowledgeBaseManager.DeleteGroupAsync(ApiKeyId, id, cancellationToken) ? NoContent() : NotFound();
 
-    // Extracted, chunked, embedded and indexed synchronously. If extraction, embedding or indexing fails the
-    // document is still stored (and downloadable) with Status "Failed" and the reason in ErrorMessage.
+    // Only stores the file and answers 202 with Status "Processing". A background worker then extracts, chunks,
+    // embeds and indexes it; poll GetDocumentText (the Location header) or ListDocuments for Status "Indexed".
+    // If that fails the document is still stored (and downloadable) with Status "Failed" and the reason in ErrorMessage.
     [HttpPost]
+    [ProducesResponseType<UploadDocumentKnowledgeBaseResponseDto>(StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status413PayloadTooLarge)]
+    [Consumes("multipart/form-data")]
     public async Task<ActionResult<UploadDocumentKnowledgeBaseResponseDto>> UploadDocument([FromForm] UploadDocumentKnowledgeBaseRequestDto request, CancellationToken cancellationToken)
     {
         var result = await knowledgeBaseManager.UploadDocumentAsync(request.ToUploadDocumentDto(ApiKeyId), cancellationToken);
 
         return result.Outcome switch
         {
-            UploadDocumentOutcome.Uploaded => Ok(result.Document!.ToUploadDocumentKnowledgeBaseResponseDto()),
+            UploadDocumentOutcome.Uploaded => AcceptedAtAction(
+                nameof(GetDocumentText),
+                new { id = result.Document!.Id },
+                result.Document.ToUploadDocumentKnowledgeBaseResponseDto()),
             UploadDocumentOutcome.GroupNotFound => NotFound(),
             UploadDocumentOutcome.TooLarge => Problem(
                 statusCode: StatusCodes.Status413PayloadTooLarge,
                 detail: $"File '{request.File.FileName}' exceeds the maximum allowed upload size."),
             UploadDocumentOutcome.UnsupportedFileType => Problem(
                 statusCode: StatusCodes.Status400BadRequest,
-                detail: $"File '{request.File.FileName}' has an unsupported file type. Supported types: .txt, .md, .pdf, .docx."),
+                detail: $"File '{request.File.FileName}' has an unsupported file type. Supported types: plain-text files (any extension), " +
+                    ".pdf, .docx and images (.png, .jpg, .jpeg, .jfif, .tif, .tiff, .bmp, .gif, .webp, .jp2, .pnm, .pbm, .pgm, .ppm)."),
             _ => throw new InvalidOperationException($"Unknown upload outcome '{result.Outcome}'.")
         };
     }
@@ -99,18 +110,99 @@ public class KnowledgeBaseController(
         return PhysicalFile(file.AbsolutePath, file.ContentType, file.OriginalFileName);
     }
 
-    // Searches across every group/document the calling key owns.
+    // All text extracted from the file. Text is null until Status is "Indexed", so this also shows the processing status.
+    [HttpGet("{id:guid}")]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<GetDocumentTextKnowledgeBaseResponseDto>> GetDocumentText(Guid id, CancellationToken cancellationToken)
+    {
+        var document = await knowledgeDocumentRepository.GetTextAsync(ApiKeyId, id, cancellationToken);
+        if (document is null)
+        {
+            return NotFound();
+        }
+
+        return Ok(document.ToGetDocumentTextKnowledgeBaseResponseDto());
+    }
+
+    // The document laid out as Markdown (headings, lists, tables), as a text/markdown file (<name>.md) that can be
+    // copied or saved as it is. 409 until the document is Indexed. Headers: X-Markdown-Source says how it was made
+    // ("Structure", "LlmPending" = an LLM lays it out better shortly, or "Llm"), and X-Markdown-Llm-Progress how far
+    // the LLM has got ("12/50") while it works.
+    [HttpGet("{id:guid}")]
+    [ProducesResponseType<string>(StatusCodes.Status200OK, "text/markdown")]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> ExportDocumentMarkdown(Guid id, CancellationToken cancellationToken)
+    {
+        var document = await knowledgeDocumentRepository.GetMarkdownAsync(ApiKeyId, id, cancellationToken);
+        if (document is null)
+        {
+            return NotFound();
+        }
+
+        if (document.MarkdownText is null)
+        {
+            return Problem(
+                statusCode: StatusCodes.Status409Conflict,
+                detail: $"The document has no Markdown yet (status {document.Status}).");
+        }
+
+        // Inline, so the browser and Swagger UI show the text; the file name is used when it is saved.
+        var contentDisposition = new ContentDispositionHeaderValue("inline");
+        contentDisposition.SetHttpFileName(document.ToMarkdownFileName());
+        Response.Headers.ContentDisposition = contentDisposition.ToString();
+        Response.Headers[MarkdownSourceHeader] = document.MarkdownSource;
+        if (document.ToLlmProgress() is { } progress)
+        {
+            Response.Headers[MarkdownLlmProgressHeader] = progress;
+        }
+
+        return Content(document.MarkdownText, "text/markdown; charset=utf-8");
+    }
+
+    // Searches every group/document the calling key owns, or only one group when GroupId is set.
     [HttpPost]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<List<SearchKnowledgeBaseResponseDto>>> Search(SearchKnowledgeBaseRequestDto request, CancellationToken cancellationToken)
     {
-        var matches = await knowledgeBaseManager.SearchAsync(ApiKeyId, request.Query, request.TopK, cancellationToken);
+        var matches = await knowledgeBaseManager.SearchAsync(ApiKeyId, request.Query, request.TopK, request.GroupId, cancellationToken);
+        if (matches is null)
+        {
+            return NotFound();
+        }
+
         return Ok(matches.Select(match => match.ToSearchKnowledgeBaseResponseDto()).ToList());
     }
 
+    // One search on the latest user message, then one answer from the model with the matches as context.
+    // Retrieves context from every group the calling key owns, or only one group when GroupId is set.
     [HttpPost]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<RagChatKnowledgeBaseResponseDto>> RagChat(RagChatKnowledgeBaseRequestDto request, CancellationToken cancellationToken)
     {
         var result = await knowledgeBaseManager.RagChatAsync(request.ToRagChatDto(ApiKeyId), cancellationToken);
+        if (result is null)
+        {
+            return NotFound();
+        }
+
         return Ok(result.ToRagChatKnowledgeBaseResponseDto());
+    }
+
+    // A research agent: checks whether the task is clear enough and otherwise asks questions back
+    // (Status "NeedsClarification"), else searches the documents in several rounds and answers with citations
+    // (Status "Answered"). Stateless like RagChat: send the whole conversation every turn. Takes from a few seconds
+    // (questions) to a minute or two (research), depending on the model.
+    [HttpPost]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<AgentChatKnowledgeBaseResponseDto>> AgentChat(AgentChatKnowledgeBaseRequestDto request, CancellationToken cancellationToken)
+    {
+        var result = await knowledgeBaseManager.AgentChatAsync(request.ToAgentChatDto(ApiKeyId), cancellationToken);
+        if (result is null)
+        {
+            return NotFound();
+        }
+
+        return Ok(result.ToAgentChatKnowledgeBaseResponseDto());
     }
 }

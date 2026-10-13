@@ -40,8 +40,11 @@ public class TesseractService(IConfiguration configuration, IHostEnvironment env
         startInfo.ArgumentList.Add(request.Languages);
         startInfo.ArgumentList.Add("--psm");
         startInfo.ArgumentList.Add(request.PageSegmentationMode.ToString(CultureInfo.InvariantCulture));
-        startInfo.ArgumentList.Add("--dpi");
-        startInfo.ArgumentList.Add(request.Dpi.ToString(CultureInfo.InvariantCulture));
+        if (request.Dpi is { } dpi)
+        {
+            startInfo.ArgumentList.Add("--dpi");
+            startInfo.ArgumentList.Add(dpi.ToString(CultureInfo.InvariantCulture));
+        }
 
         // Set directly instead of the "tsv" config file, which a custom tessdata folder usually lacks
         // (Tesseract then silently falls back to plain text).
@@ -125,6 +128,7 @@ public class TesseractService(IConfiguration configuration, IHostEnvironment env
 
             words.Add(new WordDto
             {
+                PageNumber = int.Parse(columns[1], CultureInfo.InvariantCulture),
                 BlockNumber = int.Parse(columns[2], CultureInfo.InvariantCulture),
                 ParagraphNumber = int.Parse(columns[3], CultureInfo.InvariantCulture),
                 LineNumber = int.Parse(columns[4], CultureInfo.InvariantCulture),

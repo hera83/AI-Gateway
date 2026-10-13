@@ -14,4 +14,7 @@ public class PdfPageDto
     public string Text { get; set; } = string.Empty;
 
     public List<PdfImageDto> Images { get; set; } = [];
+
+    // The text layer split into blocks in reading order, for Markdown. null if the layout analysis failed.
+    public List<PdfTextBlockDto>? Blocks { get; set; }
 }

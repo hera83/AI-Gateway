@@ -13,6 +13,9 @@ public class KnowledgeDocumentConfiguration : IEntityTypeConfiguration<Knowledge
         builder.Property(x => x.ContentType).HasMaxLength(200);
         // SQLite does not enforce lengths; this documents the expected upper bound for extracted text.
         builder.Property(x => x.ExtractedText).HasMaxLength(100_000_000);
+        builder.Property(x => x.MarkdownText).HasMaxLength(100_000_000);
+        builder.Property(x => x.MarkdownSource).HasConversion<string>().HasMaxLength(20);
+        builder.Property(x => x.MarkdownLlmDraft).HasMaxLength(100_000_000);
         builder.Property(x => x.Status).HasConversion<string>().HasMaxLength(50);
         builder.Property(x => x.ErrorMessage).HasMaxLength(2000);
         builder.HasIndex(x => x.ApiKeyId);

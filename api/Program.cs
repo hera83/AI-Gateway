@@ -110,6 +110,7 @@ builder.Services.AddScoped<IKnowledgeDocumentRepository, KnowledgeDocumentReposi
 builder.Services.Configure<KnowledgeBaseSettings>(builder.Configuration.GetSection("KnowledgeBase"));
 builder.Services.AddScoped<IKnowledgeBaseManager, KnowledgeBaseManager>();
 builder.Services.AddScoped<IApiKeyManager, ApiKeyManager>();
+builder.Services.AddSingleton<KnowledgeDocumentProcessingSignal>();
 
 // External services
 builder.Services.AddScoped<IOllamaConfigurationProvider, OllamaConfigurationProvider>();
@@ -122,6 +123,9 @@ builder.Services.AddScoped<ITesseractService, TesseractService>();
 
 // Workers
 builder.Services.AddHostedService<LogCleanupWorker>();
+builder.Services.AddHostedService<KnowledgeDocumentProcessingWorker>();
+builder.Services.AddHostedService<KnowledgeMarkdownWorker>();
+builder.Services.AddHostedService<KnowledgeFileCleanupWorker>();
 
 var app = builder.Build();
 
